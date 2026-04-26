@@ -2,43 +2,57 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Biobase BK-280 Spline Calibration", layout="wide")
-st.title("🧪 حاسبة معاملات المعايرة Spline لجهاز Biobase BK-280")
+st.set_page_config(page_title="Biobase BK-280 Spline", layout="wide")
+st.title("🧪 حاسبة معاملات المعايرة Spline – جهاز Biobase BK-280")
 
 st.markdown("""
-أدخل **5 نقاط معيارية (التركيز - Concentration و الامتصاصية - Absorbance)** ليتم حساب  
-`Par A`, `Par B`, `Par C`, `Par D` كما تظهر في شاشة المعايرة.
+أدخل **5 نقاط معيارية** (التركيز Concentration والامتصاصية Absorbance).  
+سيتم حساب `Par A, Par B, Par C, Par D` كما تظهر في شاشة المعايرة.
 """)
 
-# ----- إدخال البيانات -----
-st.sidebar.header("📥 إدخال النقاط المعيارية")
-points = []
-for i in range(1, 6):
-    col1, col2 = st.sidebar.columns(2)
-    conc = col1.number_input(f"التركيز {i}", value=0.0, step=1.0)
-    absorb = col2.number_input(f"الامتصاصية {i}", value=0.0, step=0.0001, format="%.4f")
-    points.append((conc, absorb))
+# ----- إدخال البيانات بواسطة data_editor -----
+st.subheader("📥 أدخل النقاط الخمس (استعمل الجدول أدناه)")
 
-# تحويل إلى مصفوفتين
-conc = np.array([p[0] for p in points])
-absorb = np.array([p[1] for p in points])
+# إنشاء DataFrame فارغ مكون من 5 صفوف
+default_data = pd.DataFrame({
+    "Concentration": [np.nan, np.nan, np.nan, np.nan, np.nan],
+    "Absorbance": [np.nan, np.nan, np.nan, np.nan, np.nan]
+})
 
-st.subheader("📊 البيانات المدخلة")
-df = pd.DataFrame({"Concentration": conc, "Absorbance": absorb})
-st.dataframe(df.style.format({"Absorbance": "{:.6f}"}))
+edited_df = st.data_editor(
+    default_data,
+    num_rows="fixed",
+    use_container_width=True,
+    key="cal_data"
+)
 
-# ----- النموذج الأول: كثير حدود تكعيبي (Cubic Polynomial) -----
+# استخراج القيم وإسقاط الصفوف غير المكتملة
+valid_df = edited_df.dropna()
+if len(valid_df) < 5:
+    st.warning("⚠️ يجب إدخال جميع النقاط الخمس (لا تترك خانات فارغة).")
+    st.stop()
+
+conc = valid_df["Concentration"].values
+absorb = valid_df["Absorbance"].values
+
+# التأكد من أن قيم الامتصاصية متزايدة (شرط أساسي للسلاين)
+if not np.all(np.diff(absorb) > 0):
+    st.error("❌ يجب أن تكون قيم الامتصاصية (Absorbance) متزايدة بشكل صارم (لا تكرار ولا قيم متناقصة). رتب القيم من الأصغر إلى الأكبر.")
+    st.stop()
+
+st.success("✅ البيانات المدخلة صالحة.")
+st.dataframe(valid_df.style.format({"Absorbance": "{:.6f}", "Concentration": "{:.6f}"}))
+
+# ----- النموذج الأول: كثير حدود تكعيبي واحد (Cubic Polynomial) -----
 st.header("🔷 النموذج 1: كثير حدود تكعيبي (Cubic Polynomial)")
-st.markdown("يستخدم هذا النموذج افتراض أن المنحنى هو كثير حدود من الدرجة الثالثة:")
+st.markdown("المعادلة:  \n$$Concentration = A + B \\cdot Abs + C \\cdot Abs^2 + D \\cdot Abs^3$$")
 
-# تجهيز مصفوفة Vandermonde
 X = np.vstack([np.ones_like(absorb), absorb, absorb**2, absorb**3]).T
-# ملاءمة المربعات الصغرى (إيجاد Par A,B,C,D)
-coeff, residuals, rank, s = np.linalg.lstsq(X, conc, rcond=None)
+coeff, _, _, _ = np.linalg.lstsq(X, conc, rcond=None)
 Par_A, Par_B, Par_C, Par_D = coeff
 
-st.latex(r"\text{Concentration} = A + B \cdot \text{Abs} + C \cdot \text{Abs}^2 + D \cdot \text{Abs}^3")
 st.markdown(f"""
 - **Par A (القطع الثابت)**: `{Par_A:.6f}`  
 - **Par B (الحد الخطي)**: `{Par_B:.6f}`  
@@ -50,41 +64,23 @@ st.markdown(f"""
 pred = X @ coeff
 ss_res = np.sum((conc - pred)**2)
 ss_tot = np.sum((conc - np.mean(conc))**2)
-r2 = 1 - ss_res/ss_tot
+r2 = 1 - ss_res/ss_tot if ss_tot != 0 else float('nan')
 st.caption(f"معامل التحديد R² = {r2:.4f}")
 
 # ----- النموذج الثاني: شرائح تكعيبية طبيعية (Natural Cubic Spline) -----
 st.header("🔶 النموذج 2: شرائح تكعيبية طبيعية (Natural Cubic Spline)")
-st.markdown("تفترض هذه الطريقة أن المنحنى مكون من قطع تكعيبية، وتعطي معاملات لكل جزء بين نقطتين.")
+st.markdown("كل قطعة بين نقطتين:  \n$$C_i = a_i + b_i (x - x_i) + c_i (x - x_i)^2 + d_i (x - x_i)^3$$")
 
-# يجب ترتيب البيانات حسب الامتصاصية تصاعديًا للـ spline
-sort_idx = np.argsort(absorb)
-absorb_sorted = absorb[sort_idx]
-conc_sorted = conc[sort_idx]
+cs = CubicSpline(absorb, conc, bc_type='natural')
 
-# إنشاء spline طبيعي
-cs = CubicSpline(absorb_sorted, conc_sorted, bc_type='natural')
-
-st.write("**معادلة كل قطعة:**  ")
-st.latex(r"C_i = a_i + b_i (x - x_i) + c_i (x - x_i)^2 + d_i (x - x_i)^3")
-
-# عرض المعاملات لكل قطعة
 segments = []
 for i in range(len(cs.x)-1):
-    x_i = cs.x[i]
-    a_i = cs.c[3, i] if cs.c.shape[0] > 3 else 0  # CubicSpline.c shape = (4, n-1) للإصدارات الحديثة
-    # في scipy، مصفوفة المعاملات cs.c تكون بالشكل:
-    # الصفوف: المعاملات لـ (x-x_i)^3 , (x-x_i)^2 , (x-x_i)^1 , الثابت
-    # لكن الترتيب قد يختلف حسب الإصدار. سنقرأها بأمان:
-    coeff_matrix = cs.c
-    # غالباً يكون shape = (4, n-1)، حيث الصف 0 لـ x^3، الصف 1 لـ x^2، الصف 2 لـ x^1، الصف 3 الثابت
-    a = coeff_matrix[3][i]  # الثابت (قيمة الدالة عند x_i)
-    b = coeff_matrix[2][i]  # معامل الحد الخطي
-    c = coeff_matrix[1][i]  # معامل التربيعي
-    d = coeff_matrix[0][i]  # معامل التكعيبي
-
+    a = cs.c[3, i]  # الثابت
+    b = cs.c[2, i]  # الحد الخطي
+    c = cs.c[1, i]  # الحد التربيعي
+    d = cs.c[0, i]  # الحد التكعيبي
     segments.append({
-        "القطعة": f"{i+1} (من {x_i:.6f} إلى {cs.x[i+1]:.6f})",
+        "القطعة": f"{i+1} (من {cs.x[i]:.6f} إلى {cs.x[i+1]:.6f})",
         "a": a,
         "b": b,
         "c": c,
@@ -100,16 +96,10 @@ st.dataframe(seg_df.style.format({
     "Par D (d)": "{:.6f}"
 }))
 
-# ----- رسم بياني توضيحي -----
-st.header("📈 الشكل البياني للمعايرة")
-import plotly.graph_objects as go
-
+# ----- الرسم البياني -----
+st.header("📈 منحنيات المعايرة")
 x_plot = np.linspace(absorb.min(), absorb.max(), 200)
-
-# النموذج التكعيبي الكلي
 y_poly = Par_A + Par_B * x_plot + Par_C * x_plot**2 + Par_D * x_plot**3
-
-# النموذج الشريحي
 y_spline = cs(x_plot)
 
 fig = go.Figure()
@@ -119,25 +109,11 @@ fig.add_trace(go.Scatter(x=x_plot, y=y_poly, mode='lines', name='كثير حدو
                          line=dict(dash='dash')))
 fig.add_trace(go.Scatter(x=x_plot, y=y_spline, mode='lines', name='شرائح تكعيبية (نموذج 2)',
                          line=dict(dash='dot')))
-
 fig.update_layout(xaxis_title="Absorbance", yaxis_title="Concentration",
                   template="plotly_white", height=500)
 st.plotly_chart(fig, use_container_width=True)
 
-# ----- تعليمات النشر -----
-st.sidebar.header("🚀 نشر التطبيق")
-st.sidebar.markdown("""
-1. ارفع الملف `spline_calibrator.py` إلى مستودع GitHub.
-2. اذهب إلى [share.streamlit.io](https://share.streamlit.io) واربط المستودع.
-3. شغّل التطبيق واستخدمه مباشرة من المتصفح.
-
-المتطلبات في `requirements.txt`:
+st.sidebar.info("""
+📌 **ترتيب القيم**: يجب إدخال قيم الامتصاصية من الأصغر إلى الأكبر.  
+إذا كانت بيانات جهازك تحتوي على قيم مكررة أو غير مرتبة، قم بترتيبها أولاً.
 """)
-st.sidebar.code("streamlit\nnumpy\npandas\nscipy\nplotly")
-
-st.sidebar.markdown("---")
-st.sidebar.info(
-    "📌 إذا كانت معاملات جهازك لا تتطابق مع أحد النموذجين، "
-    "فقد يستخدم الجهاز صيغة مختلفة (مثل تحويل لوغاريتمي). "
-    "في هذه الحالة يُرجى مراجعة كتيب الجهاز أو تزويدي بالصيغة الدقيقة لأعدل الكود."
-)
